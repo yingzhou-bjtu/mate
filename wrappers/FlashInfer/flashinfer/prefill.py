@@ -236,7 +236,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             return result
 
         output, softmax_lse = result
-        softmax_lse = softmax_lse.transpose(0, 1).contiguous()
+        softmax_lse = softmax_lse.transpose(0, 1)
         if lse is not None:
             lse.copy_(softmax_lse)
             softmax_lse = lse

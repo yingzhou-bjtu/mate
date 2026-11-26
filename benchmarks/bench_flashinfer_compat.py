@@ -140,10 +140,24 @@ def correctness(backend: str) -> dict:
         return_softmax_lse=True,
         backend=backend,
     )
-    direct_prefill_lse = direct_prefill_lse.transpose(0, 1).contiguous()
+    direct_prefill_lse = direct_prefill_lse.transpose(0, 1)
     reference_output, reference_lse = _reference_varlen(
         q, k, v, q_lens, k_lens, True, sm_scale
     )
+    cached_output = torch.randn_like(output)
+    cached_lse = torch.randn_like(lse)
+    merged_prefill_output, merged_prefill_lse = merge_state(
+        output, lse, cached_output, cached_lse
+    )
+    merged_prefill_max = torch.maximum(lse, cached_lse)
+    merged_prefill_weight_a = torch.exp(lse - merged_prefill_max)
+    merged_prefill_weight_b = torch.exp(cached_lse - merged_prefill_max)
+    merged_prefill_denominator = merged_prefill_weight_a + merged_prefill_weight_b
+    reference_merged_prefill_output = (
+        merged_prefill_weight_a.unsqueeze(-1) * output.float()
+        + merged_prefill_weight_b.unsqueeze(-1) * cached_output.float()
+    ) / merged_prefill_denominator.unsqueeze(-1)
+    reference_merged_prefill_lse = merged_prefill_max + merged_prefill_denominator.log()
 
     torch.manual_seed(11)
     seq_len = 65
@@ -208,6 +222,12 @@ def correctness(backend: str) -> dict:
         "prefill_lse_max_abs": _max_abs_error(lse, reference_lse),
         "prefill_wrapper_vs_direct_output": _max_abs_error(output, direct_output),
         "prefill_wrapper_vs_direct_lse": _max_abs_error(lse, direct_prefill_lse),
+        "prefill_to_cascade_output_max_abs": _max_abs_error(
+            merged_prefill_output, reference_merged_prefill_output
+        ),
+        "prefill_to_cascade_lse_max_abs": _max_abs_error(
+            merged_prefill_lse, reference_merged_prefill_lse
+        ),
         "cascade_output_max_abs": _max_abs_error(merged_v, reference_merged_v),
         "cascade_lse_max_abs": _max_abs_error(merged_lse, reference_merged_lse),
         "cascade_wrapper_vs_direct_output": _max_abs_error(
@@ -233,6 +253,8 @@ def correctness(backend: str) -> dict:
     assert result["prefill_lse_max_abs"] <= 1e-5
     assert result["prefill_wrapper_vs_direct_output"] <= 1e-4
     assert result["prefill_wrapper_vs_direct_lse"] <= 1e-5
+    assert result["prefill_to_cascade_output_max_abs"] <= 0.02
+    assert result["prefill_to_cascade_lse_max_abs"] <= 1e-5
     assert result["cascade_output_max_abs"] <= 0.02
     assert result["cascade_lse_max_abs"] <= 1e-5
     assert result["cascade_wrapper_vs_direct_output"] <= 1e-4
