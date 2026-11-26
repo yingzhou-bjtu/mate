@@ -7,6 +7,7 @@ from . import gemm as gemm
 from . import mamba as mamba
 from . import mla as mla
 from . import norm as norm
+from . import prefill as prefill
 from . import rope as rope
 from .cascade import merge_state as merge_state
 from .cascade import merge_state_in_place as merge_state_in_place
@@ -35,6 +36,9 @@ from .norm import layernorm as layernorm
 from .norm import layernorm_quant as layernorm_quant
 from .norm import rmsnorm as rmsnorm
 from .norm import rmsnorm_quant as rmsnorm_quant
+from .prefill import (
+    BatchPrefillWithRaggedKVCacheWrapper as BatchPrefillWithRaggedKVCacheWrapper,
+)
 
 try:
     from ._build_meta import __git_version__ as __git_version__
@@ -70,6 +74,7 @@ __version__ = _load_version()
 __all__ = [
     "__git_version__",
     "__version__",
+    "BatchPrefillWithRaggedKVCacheWrapper",
     "bmm_bf16",
     "bmm_fp8",
     "cascade",
@@ -92,6 +97,7 @@ __all__ = [
     "merge_states",
     "mla",
     "norm",
+    "prefill",
     "rope",
     "rmsnorm",
     "rmsnorm_quant",
