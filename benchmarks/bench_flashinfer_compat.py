@@ -173,7 +173,7 @@ def correctness(backend: str) -> dict:
     s_b = torch.randn_like(s_a)
     merged_v, merged_lse = merge_state(v_a, s_a, v_b, s_b)
     direct_v, direct_cascade_lse = flash_attn_combine(
-        torch.stack((v_a, v_b)).unsqueeze(1).float(),
+        torch.stack((v_a, v_b)).unsqueeze(1),
         torch.stack((s_a, s_b))
         .unsqueeze(1)
         .transpose(2, 3)
@@ -345,7 +345,7 @@ def benchmark(
     v_b = torch.randn_like(v_a)
     s_a = torch.randn((seq_len, num_heads), dtype=torch.float32, device="musa")
     s_b = torch.randn_like(s_a)
-    direct_partial = torch.stack((v_a, v_b)).unsqueeze(1).float()
+    direct_partial = torch.stack((v_a, v_b)).unsqueeze(1)
     direct_lse = torch.stack((s_a, s_b)).unsqueeze(1)
     direct_lse = direct_lse.transpose(2, 3).contiguous().transpose(2, 3)
 
@@ -461,7 +461,7 @@ def graph_check(
     v_b = torch.randn_like(v_a)
     s_a = torch.randn((seq_len, num_heads), dtype=torch.float32, device="musa")
     s_b = torch.randn_like(s_a)
-    direct_partial = torch.stack((v_a, v_b)).unsqueeze(1).float()
+    direct_partial = torch.stack((v_a, v_b)).unsqueeze(1)
     direct_lse = torch.stack((s_a, s_b)).unsqueeze(1)
     direct_lse = direct_lse.transpose(2, 3).contiguous().transpose(2, 3)
     direct_cascade = torch.musa.make_graphed_callables(
