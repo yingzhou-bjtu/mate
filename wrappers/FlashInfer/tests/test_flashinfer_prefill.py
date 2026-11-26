@@ -25,6 +25,7 @@ def _fake_varlen(
     scheduler_metadata,
     return_softmax_lse,
     out,
+    backend,
 ):
     assert cu_seqlens_q.tolist() == [0, 2, 5]
     assert cu_seqlens_k.tolist() == [0, 3, 6]
@@ -35,6 +36,7 @@ def _fake_varlen(
     assert window_size == (-1, -1)
     assert softcap == 0.0
     assert scheduler_metadata.tolist() == [7]
+    assert backend == "auto"
     output = torch.zeros_like(q) if out is None else out
     softmax_lse = torch.arange(q.shape[1] * q.shape[0], dtype=torch.float32).reshape(
         q.shape[1], q.shape[0]

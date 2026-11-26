@@ -230,6 +230,7 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             scheduler_metadata=self._scheduler_metadata,
             return_softmax_lse=requested_lse,
             out=out,
+            backend=self._backend,
         )
         if not requested_lse:
             return result
