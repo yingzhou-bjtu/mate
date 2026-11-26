@@ -10,6 +10,7 @@ def _fake_combine(
     out_dtype: torch.dtype | None = None,
 ):
     assert out is None
+    assert lse_partial.stride(-2) == 1
     lse = lse_partial.to(torch.float32)
     max_lse = lse.amax(dim=0, keepdim=True)
     weights = torch.exp(lse - max_lse)
