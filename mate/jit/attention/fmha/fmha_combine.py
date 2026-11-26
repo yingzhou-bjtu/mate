@@ -30,6 +30,17 @@ def _fmha_fwd_combine_encode(config: Mapping[str, object]) -> str:
     else:
         raise ValueError(f"Unsupported element type: {config['element']}")
 
+    if config["partial_element"] == "mutlass::half_t":
+        name_list.append("partial_f16")
+    elif config["partial_element"] == "mutlass::bfloat16_t":
+        name_list.append("partial_bf16")
+    elif config["partial_element"] == "float":
+        name_list.append("partial_f32")
+    else:
+        raise ValueError(
+            f"Unsupported partial element type: {config['partial_element']}"
+        )
+
     name_list.append(f"{config['tile_m']}x{config['tile_n']}x{config['max_splits']}")
     if config["has_cu_seqlens_q"]:
         mode = "ragged_q"
@@ -120,6 +131,15 @@ specs.append(
     ParamSpec(
         name="element",
         domain=[dtype_torch2mutlass_map[x] for x in [torch.bfloat16]],
+    )
+)
+specs.append(
+    ParamSpec(
+        name="partial_element",
+        domain=[
+            dtype_torch2mutlass_map[x]
+            for x in [torch.float16, torch.bfloat16, torch.float32]
+        ],
     )
 )
 specs_select = [
@@ -231,6 +251,7 @@ def _fmha_fwd_combine(
         "has_seqused_q": seqused_q is not None,
         "has_metadata": metadata is not None,
         "element": dtype_torch2mutlass_map[out.dtype],
+        "partial_element": dtype_torch2mutlass_map[out_accum.dtype],
         "tile_m": tile_m,
         "tile_n": tile_n,
         "max_splits": max_splits,
@@ -270,8 +291,12 @@ def _flash_attn_combine(
         raise ValueError("out_partial must be a 5D tensor")
     if lse_partial.dim() != 4:
         raise ValueError("lse_partial must be a 4D tensor")
-    if out_partial.dtype != torch.float32:
-        raise ValueError("out_partial must be float32")
+    if out_partial.dtype not in {
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    }:
+        raise ValueError("out_partial must be float16, bfloat16, or float32")
     if lse_partial.dtype != torch.float32:
         raise ValueError("lse_partial must be float32")
     if out_partial.device != lse_partial.device:

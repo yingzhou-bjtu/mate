@@ -751,6 +751,41 @@ def test_combine_high_splits(workload: FmhaWorkload) -> None:
     _run_fmha_workload(workload)
 
 
+@supported_musa_compute_capability([31])
+@pytest.mark.parametrize("partial_dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_combine_lowp_partial(partial_dtype: torch.dtype) -> None:
+    torch.manual_seed(123)
+    num_splits = 2
+    batch_size = 1
+    seq_len = 65
+    num_heads = 8
+    head_dim = 128
+    out_partial = torch.randn(
+        (num_splits, batch_size, seq_len, num_heads, head_dim),
+        dtype=torch.float32,
+        device="musa",
+    ).to(partial_dtype)
+    lse_storage = torch.randn(
+        (num_splits, batch_size, num_heads, seq_len),
+        dtype=torch.float32,
+        device="musa",
+    )
+    lse_partial = lse_storage.transpose(2, 3)
+
+    output, lse = flash_attn_combine(out_partial, lse_partial, out_dtype=torch.bfloat16)
+    max_lse = lse_partial.amax(dim=0, keepdim=True)
+    weights = torch.exp(lse_partial - max_lse)
+    denominator = weights.sum(dim=0)
+    reference_output = (out_partial.float() * weights.unsqueeze(-1)).sum(
+        dim=0
+    ) / denominator.unsqueeze(-1)
+    reference_lse = max_lse.squeeze(0) + denominator.log()
+
+    torch.testing.assert_close(output.float(), reference_output, atol=0.02, rtol=0.02)
+    torch.testing.assert_close(lse, reference_lse, atol=1e-4, rtol=1e-4)
+
+
 @pytest.mark.mate_dry_run
 @supported_musa_compute_capability([31])
 @pytest.mark.parametrize("workload", KVCACHE_FEATURE_WORKLOADS, ids=str)
