@@ -18,6 +18,16 @@ def _validate_state(v: torch.Tensor, s: torch.Tensor, name: str) -> None:
         )
 
 
+def _prepare_lse_partial(lse: torch.Tensor) -> torch.Tensor:
+    storage = torch.empty(
+        (lse.shape[1], 1, lse.shape[2], lse.shape[0]),
+        dtype=torch.float32,
+        device=lse.device,
+    )
+    storage.copy_(lse.permute(1, 2, 0).unsqueeze(1))
+    return storage.transpose(2, 3)
+
+
 def _combine_two_states(
     v_a: torch.Tensor,
     s_a: torch.Tensor,
@@ -25,10 +35,7 @@ def _combine_two_states(
     s_b: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_partial = torch.stack((v_a, v_b)).unsqueeze(1).to(torch.float32)
-    lse_partial = torch.stack(
-        (s_a.to(torch.float32).contiguous(), s_b.to(torch.float32).contiguous())
-    ).unsqueeze(1)
-    lse_partial = lse_partial.transpose(2, 3).contiguous().transpose(2, 3)
+    lse_partial = _prepare_lse_partial(torch.stack((s_a, s_b), dim=1))
     out, lse = flash_attn_combine(out_partial, lse_partial, out_dtype=v_a.dtype)
     return out.squeeze(0), lse.squeeze(0)
 
@@ -83,7 +90,6 @@ def merge_states(v: torch.Tensor, s: torch.Tensor) -> tuple[torch.Tensor, torch.
         raise ValueError("num_states must be greater than zero")
 
     out_partial = v.permute(1, 0, 2, 3).unsqueeze(1).to(torch.float32)
-    lse_partial = s.to(torch.float32).permute(1, 0, 2).unsqueeze(1)
-    lse_partial = lse_partial.transpose(2, 3).contiguous().transpose(2, 3)
+    lse_partial = _prepare_lse_partial(s)
     out, lse = flash_attn_combine(out_partial, lse_partial, out_dtype=v.dtype)
     return out.squeeze(0), lse.squeeze(0)
