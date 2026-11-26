@@ -34,8 +34,20 @@ def _combine_two_states(
     v_b: torch.Tensor,
     s_b: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    out_partial = torch.stack((v_a, v_b)).unsqueeze(1).to(torch.float32)
-    lse_partial = _prepare_lse_partial(torch.stack((s_a, s_b), dim=1))
+    out_partial = torch.empty(
+        (2, 1, *v_a.shape), dtype=torch.float32, device=v_a.device
+    )
+    out_partial[0, 0].copy_(v_a)
+    out_partial[1, 0].copy_(v_b)
+
+    lse_storage = torch.empty(
+        (2, 1, s_a.shape[1], s_a.shape[0]),
+        dtype=torch.float32,
+        device=s_a.device,
+    )
+    lse_storage[0, 0].copy_(s_a.transpose(0, 1))
+    lse_storage[1, 0].copy_(s_b.transpose(0, 1))
+    lse_partial = lse_storage.transpose(2, 3)
     out, lse = flash_attn_combine(out_partial, lse_partial, out_dtype=v_a.dtype)
     return out.squeeze(0), lse.squeeze(0)
 
