@@ -1,12 +1,16 @@
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from . import cascade as cascade
 from . import decode as decode
 from . import gemm as gemm
 from . import mamba as mamba
 from . import mla as mla
 from . import norm as norm
 from . import rope as rope
+from .cascade import merge_state as merge_state
+from .cascade import merge_state_in_place as merge_state_in_place
+from .cascade import merge_states as merge_states
 from .gemm import bmm_bf16 as bmm_bf16
 from .gemm import bmm_fp8 as bmm_fp8
 from .norm import fused_add_rmsnorm as fused_add_rmsnorm
@@ -68,6 +72,7 @@ __all__ = [
     "__version__",
     "bmm_bf16",
     "bmm_fp8",
+    "cascade",
     "decode",
     "fused_add_rmsnorm",
     "fused_add_rmsnorm_fp8_block_quant",
@@ -82,6 +87,9 @@ __all__ = [
     "gemma_rmsnorm",
     "layernorm",
     "layernorm_quant",
+    "merge_state",
+    "merge_state_in_place",
+    "merge_states",
     "mla",
     "norm",
     "rope",
