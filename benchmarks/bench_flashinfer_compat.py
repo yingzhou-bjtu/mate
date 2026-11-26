@@ -245,10 +245,15 @@ def correctness(backend: str) -> dict:
     return result
 
 
-def benchmark(iters: int, warmup: int, backend: str) -> dict:
+def benchmark(
+    iters: int,
+    warmup: int,
+    backend: str,
+    q_lens: tuple[int, ...],
+    cascade_seq_len: int,
+) -> dict:
     torch.manual_seed(17)
-    q_lens = [128, 257]
-    k_lens = [128, 257]
+    k_lens = q_lens
     num_qo_heads = 16
     num_kv_heads = 8
     head_dim = 128
@@ -295,8 +300,8 @@ def benchmark(iters: int, warmup: int, backend: str) -> dict:
             v,
             cu_seqlens_q=direct_qo_indptr,
             cu_seqlens_k=direct_kv_indptr,
-            max_seqlen_q=257,
-            max_seqlen_k=257,
+            max_seqlen_q=max(q_lens),
+            max_seqlen_k=max(k_lens),
             softmax_scale=sm_scale,
             causal=True,
             scheduler_metadata=scheduler_metadata,
@@ -307,7 +312,7 @@ def benchmark(iters: int, warmup: int, backend: str) -> dict:
     def wrapped_prefill():
         return wrapper.forward_return_lse(q, k, v, causal=True, sm_scale=sm_scale)
 
-    seq_len = 1024
+    seq_len = cascade_seq_len
     num_heads = 32
     head_dim_v = 128
     v_a = torch.randn(
@@ -351,6 +356,144 @@ def benchmark(iters: int, warmup: int, backend: str) -> dict:
     }
 
 
+def graph_check(
+    backend: str,
+    iters: int,
+    warmup: int,
+    q_lens: tuple[int, ...],
+    cascade_seq_len: int,
+) -> dict:
+    torch.manual_seed(23)
+    k_lens = q_lens
+    num_qo_heads = 16
+    num_kv_heads = 8
+    head_dim = 128
+    sm_scale = head_dim**-0.5
+    qo_indptr = torch.tensor(
+        [0, q_lens[0], sum(q_lens)], dtype=torch.int32, device="musa"
+    )
+    kv_indptr = torch.tensor(
+        [0, k_lens[0], sum(k_lens)], dtype=torch.int32, device="musa"
+    )
+    q = torch.randn(
+        (sum(q_lens), num_qo_heads, head_dim),
+        dtype=torch.bfloat16,
+        device="musa",
+    )
+    k = torch.randn(
+        (sum(k_lens), num_kv_heads, head_dim),
+        dtype=torch.bfloat16,
+        device="musa",
+    )
+    v = torch.randn_like(k)
+    wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+        torch.empty(1 << 24, dtype=torch.uint8, device="musa"),
+        backend=backend,
+    )
+    wrapper.plan(
+        qo_indptr,
+        kv_indptr,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        causal=True,
+        sm_scale=sm_scale,
+        q_data_type=torch.bfloat16,
+    )
+
+    direct_prefill = torch.musa.make_graphed_callables(
+        lambda q, k, v: flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=wrapper._qo_indptr_device,
+            cu_seqlens_k=wrapper._kv_indptr_device,
+            max_seqlen_q=wrapper._max_qo_len,
+            max_seqlen_k=wrapper._max_kv_len,
+            softmax_scale=sm_scale,
+            causal=True,
+            scheduler_metadata=wrapper._scheduler_metadata,
+            return_softmax_lse=True,
+            backend=backend,
+        ),
+        (q, k, v),
+    )
+    wrapped_prefill = torch.musa.make_graphed_callables(
+        lambda q, k, v: wrapper.forward_return_lse(
+            q, k, v, causal=True, sm_scale=sm_scale
+        ),
+        (q, k, v),
+    )
+    direct_output, direct_prefill_lse = direct_prefill(q, k, v)
+    wrapped_output, wrapped_prefill_lse = wrapped_prefill(q, k, v)
+    direct_prefill_lse = direct_prefill_lse.transpose(0, 1).contiguous()
+
+    seq_len = cascade_seq_len
+    num_heads = 32
+    head_dim_v = 128
+    v_a = torch.randn(
+        (seq_len, num_heads, head_dim_v),
+        dtype=torch.bfloat16,
+        device="musa",
+    )
+    v_b = torch.randn_like(v_a)
+    s_a = torch.randn((seq_len, num_heads), dtype=torch.float32, device="musa")
+    s_b = torch.randn_like(s_a)
+    direct_partial = torch.stack((v_a, v_b)).unsqueeze(1).float()
+    direct_lse = torch.stack((s_a, s_b)).unsqueeze(1)
+    direct_lse = direct_lse.transpose(2, 3).contiguous().transpose(2, 3)
+    direct_cascade = torch.musa.make_graphed_callables(
+        lambda partial, lse: flash_attn_combine(partial, lse, out_dtype=torch.bfloat16),
+        (direct_partial, direct_lse),
+    )
+    wrapped_cascade = torch.musa.make_graphed_callables(
+        merge_state,
+        (v_a, s_a, v_b, s_b),
+    )
+    direct_cascade_v, direct_cascade_lse = direct_cascade(direct_partial, direct_lse)
+    wrapped_cascade_v, wrapped_cascade_lse = wrapped_cascade(v_a, s_a, v_b, s_b)
+
+    flush = torch.empty(1 << 27, dtype=torch.uint8, device="musa")
+    result = {
+        "prefill_wrapper_vs_direct_output": _max_abs_error(
+            wrapped_output, direct_output
+        ),
+        "prefill_wrapper_vs_direct_lse": _max_abs_error(
+            wrapped_prefill_lse, direct_prefill_lse
+        ),
+        "prefill_direct_graph": _timings(
+            lambda: direct_prefill(q, k, v), flush, warmup, iters
+        ),
+        "prefill_wrapper_graph": _timings(
+            lambda: wrapped_prefill(q, k, v), flush, warmup, iters
+        ),
+        "cascade_wrapper_vs_direct_output": _max_abs_error(
+            wrapped_cascade_v, direct_cascade_v.squeeze(0)
+        ),
+        "cascade_wrapper_vs_direct_lse": _max_abs_error(
+            wrapped_cascade_lse, direct_cascade_lse.squeeze(0)
+        ),
+        "cascade_direct_graph": _timings(
+            lambda: direct_cascade(direct_partial, direct_lse),
+            flush,
+            warmup,
+            iters,
+        ),
+        "cascade_wrapper_graph": _timings(
+            lambda: wrapped_cascade(v_a, s_a, v_b, s_b),
+            flush,
+            warmup,
+            iters,
+        ),
+        "passed": True,
+    }
+    assert result["prefill_wrapper_vs_direct_output"] <= 1e-4
+    assert result["prefill_wrapper_vs_direct_lse"] <= 1e-5
+    assert result["cascade_wrapper_vs_direct_output"] <= 1e-4
+    assert result["cascade_wrapper_vs_direct_lse"] <= 1e-5
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=20)
@@ -359,6 +502,13 @@ def main() -> None:
         "--backend", choices=("auto", "mutlass", "mubin"), default="auto"
     )
     parser.add_argument("--correctness-only", action="store_true")
+    parser.add_argument("--graph", action="store_true")
+    parser.add_argument(
+        "--q-lens",
+        default="128,257",
+        help="Comma-separated ragged Q/K lengths",
+    )
+    parser.add_argument("--cascade-seq-len", type=int, default=1024)
     args = parser.parse_args()
 
     result = {
@@ -369,7 +519,22 @@ def main() -> None:
         "correctness": correctness(args.backend),
     }
     if not args.correctness_only:
-        result["benchmark"] = benchmark(args.iterations, args.warmup, args.backend)
+        q_lens = tuple(int(value) for value in args.q_lens.split(","))
+        result["benchmark"] = benchmark(
+            args.iterations,
+            args.warmup,
+            args.backend,
+            q_lens,
+            args.cascade_seq_len,
+        )
+        if args.graph:
+            result["graph"] = graph_check(
+                args.backend,
+                args.iterations,
+                args.warmup,
+                q_lens,
+                args.cascade_seq_len,
+            )
     print(json.dumps(result, indent=2))
 
 
