@@ -236,6 +236,22 @@ The wrapper delegates the merge computation to MATE's existing
 `merge_state_in_place` also accepts a boolean `[seq_len]` mask for graph-safe
 conditional updates.
 
+## Ragged prefill API
+
+`BatchPrefillWithRaggedKVCacheWrapper` provides the FlashInfer ragged prefill
+contract while delegating attention to MATE's FA3-compatible varlen mainloop:
+
+```python
+from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
+```
+
+The supported subset accepts packed `[tokens, heads, head_dim]` Q/K/V tensors,
+uses `qo_indptr` and `kv_indptr` for variable sequence lengths, and supports
+causal attention, sliding windows, softcapping, and optional output LSE.
+
+Custom masks, RoPE inside the prefill wrapper, prefix metadata, and legacy
+positional `run` arguments are not supported in this compatibility layer.
+
 ## Mamba / SSD APIs
 
 ```python
