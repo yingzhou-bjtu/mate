@@ -59,7 +59,8 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         self._jit_args = jit_args
         self._jit_kwargs = jit_kwargs
         self._scheduler_metadata = None
-        self._scheduler_key = None
+        self._qo_indptr_device = None
+        self._kv_indptr_device = None
 
     def is_cuda_graph_enabled(self) -> bool:
         return self._use_cuda_graph
@@ -70,7 +71,6 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         self._float_workspace_buffer = float_workspace_buffer
         self._int_workspace_buffer = int_workspace_buffer
         self._scheduler_metadata = None
-        self._scheduler_key = None
 
     def plan(
         self,
@@ -131,11 +131,32 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         self._sm_scale = sm_scale
         self._q_data_type = _torch_dtype(q_data_type)
         self._kv_data_type = _torch_dtype(kv_data_type or q_data_type)
+        if self._q_data_type != self._kv_data_type:
+            raise NotImplementedError("different Q and KV dtypes are not supported")
         self._max_qo_len = _max_seqlen(qo_indptr)
         self._max_kv_len = _max_seqlen(kv_indptr)
         self._batch_size = qo_indptr.numel() - 1
-        self._scheduler_metadata = None
-        self._scheduler_key = None
+        device = self._float_workspace_buffer.device
+        self._qo_indptr_device = qo_indptr.to(device=device, non_blocking=True)
+        self._kv_indptr_device = kv_indptr.to(device=device, non_blocking=True)
+        self._scheduler_metadata = get_scheduler_metadata(
+            self._batch_size,
+            self._max_qo_len,
+            self._max_kv_len,
+            self._num_qo_heads,
+            self._num_kv_heads,
+            self._head_dim_qk,
+            qkv_dtype=self._q_data_type,
+            headdim_v=self._head_dim_vo,
+            cu_seqlens_q=self._qo_indptr_device,
+            cu_seqlens_k=self._kv_indptr_device,
+            causal=self._causal,
+            window_size=self._window_size(self._window_left),
+            attention_chunk=0,
+            has_softcap=bool(self._logits_soft_cap),
+            num_splits=0,
+            pack_gqa=None,
+        )
 
     begin_forward = plan
 
@@ -144,34 +165,6 @@ class BatchPrefillWithRaggedKVCacheWrapper:
         if window_left < 0:
             return (-1, -1)
         return (window_left, 0)
-
-    def _get_scheduler_metadata(
-        self, q: torch.Tensor, qo_indptr: torch.Tensor, kv_indptr: torch.Tensor
-    ):
-        key = (q.device, q.dtype)
-        if self._scheduler_metadata is not None and self._scheduler_key == key:
-            return self._scheduler_metadata
-
-        self._scheduler_metadata = get_scheduler_metadata(
-            self._batch_size,
-            self._max_qo_len,
-            self._max_kv_len,
-            self._num_qo_heads,
-            self._num_kv_heads,
-            self._head_dim_qk,
-            qkv_dtype=q.dtype,
-            headdim_v=self._head_dim_vo,
-            cu_seqlens_q=qo_indptr,
-            cu_seqlens_k=kv_indptr,
-            causal=self._causal,
-            window_size=self._window_size(self._window_left),
-            attention_chunk=0,
-            has_softcap=bool(self._logits_soft_cap),
-            num_splits=0,
-            pack_gqa=None,
-        )
-        self._scheduler_key = key
-        return self._scheduler_metadata
 
     def run(
         self,
@@ -210,10 +203,10 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             or v.dtype != self._kv_data_type
         ):
             raise ValueError("Q/K/V dtype does not match the planned dtype")
-
-        qo_indptr = self._qo_indptr_buf.to(device=q.device, non_blocking=True)
-        kv_indptr = self._kv_indptr_buf.to(device=q.device, non_blocking=True)
-        scheduler_metadata = self._get_scheduler_metadata(q, qo_indptr, kv_indptr)
+        if q.device != self._float_workspace_buffer.device:
+            raise ValueError("Q device does not match the planned workspace device")
+        if self._qo_indptr_device is None or self._kv_indptr_device is None:
+            raise RuntimeError("plan or begin_forward must be called before run")
         causal = self._causal if causal is None else causal
         window_left = self._window_left if window_left is None else window_left
         logits_soft_cap = (
@@ -226,15 +219,15 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             q,
             k,
             v,
-            cu_seqlens_q=qo_indptr,
-            cu_seqlens_k=kv_indptr,
+            cu_seqlens_q=self._qo_indptr_device,
+            cu_seqlens_k=self._kv_indptr_device,
             max_seqlen_q=self._max_qo_len,
             max_seqlen_k=self._max_kv_len,
             softmax_scale=sm_scale,
             causal=causal,
             window_size=self._window_size(window_left),
             softcap=logits_soft_cap or 0.0,
-            scheduler_metadata=scheduler_metadata,
+            scheduler_metadata=self._scheduler_metadata,
             return_softmax_lse=requested_lse,
             out=out,
         )
