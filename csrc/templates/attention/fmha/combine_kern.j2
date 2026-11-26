@@ -42,7 +42,7 @@ void {{ func_name }} (
   constexpr int MaxSplits = {{ max_splits }};
 
   using Element = {{ element }};
-  using ElementPartial = float;
+  using ElementPartial = {{ partial_element }};
 
   using TileShape_MK = Shape<Int<TileM>, Int<TileN>>;
 
@@ -83,7 +83,7 @@ void {{ func_name }} (
 
     // LSE
     .softmax_lse_ptr = lse.data_ptr(),
-    .softmax_lseaccum_ptr = static_cast<ElementPartial*>(lse_accum.data_ptr()),
+    .softmax_lseaccum_ptr = static_cast<float*>(lse_accum.data_ptr()),
     .lse_batch_stride = HasCuseqlensQ ? 0 : lse.stride(0),
     .lse_head_stride = lse.stride(-2),
 
@@ -117,7 +117,7 @@ void {{ func_name }} (
     .ptr_O_partial = static_cast<ElementPartial const*>(params.oaccum_ptr),
     .shape_O_partial = {!HasCuseqlensQ ? params.seqlen_q : params.total_q, params.dv, params.num_splits, params.h, !HasCuseqlensQ ? params.b : 1},
     .stride_O_partial = {params.oaccum_row_stride, _1{}, params.oaccum_split_stride, params.oaccum_head_stride, !HasCuseqlensQ ? params.oaccum_batch_stride : 0},
-    .ptr_LSE_partial = static_cast<ElementPartial const*>(params.softmax_lseaccum_ptr),
+    .ptr_LSE_partial = static_cast<float const*>(params.softmax_lseaccum_ptr),
     .shape_LSE_partial = {!HasCuseqlensQ ? params.seqlen_q : params.total_q, params.num_splits, params.h, !HasCuseqlensQ ? params.b : 1},
     .stride_LSE_partial = {_1{}, params.lseaccum_split_stride, params.lseaccum_head_stride, !HasCuseqlensQ ? params.lseaccum_batch_stride : 0},
     .ptr_O = static_cast<Element*>(params.o_ptr),
