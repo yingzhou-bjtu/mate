@@ -216,6 +216,26 @@ out, lse = flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla(
 Prepare a new metadata object after changing `seq_lens`, query shape, or top-k.
 Do not share one metadata object between overlapping decode calls.
 
+## Cascade APIs
+
+The cascade compatibility layer exposes FlashInfer-style attention-state
+merging on MUSA:
+
+```python
+from flashinfer.cascade import merge_state, merge_state_in_place, merge_states
+```
+
+The wrapper delegates the merge computation to MATE's existing
+`mate.flash_attn_combine` FMHA operator:
+
+- `v_a`, `v_b`, and merged `v`: `[seq_len, heads, head_dim]`.
+- `s_a`, `s_b`, and merged `s`: `[seq_len, heads]` in float32.
+- `merge_states`: `[seq_len, num_states, heads, head_dim]` and
+  `[seq_len, num_states, heads]`.
+
+`merge_state_in_place` also accepts a boolean `[seq_len]` mask for graph-safe
+conditional updates.
+
 ## Mamba / SSD APIs
 
 ```python
