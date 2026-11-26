@@ -5,7 +5,7 @@ import json
 import statistics
 
 import torch
-from flashinfer.cascade import merge_state
+from flashinfer.cascade import merge_state, merge_state_in_place, merge_states
 from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
 from mate.mha_interface import flash_attn_combine, flash_attn_varlen_func
@@ -77,7 +77,14 @@ def _reference_varlen(q, k, v, q_lens, k_lens, causal, sm_scale):
 
 
 def _max_abs_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    return (actual.float() - expected.float()).abs().max().item()
+    if actual.shape != expected.shape:
+        raise ValueError(
+            f"shape mismatch: actual={tuple(actual.shape)} "
+            f"expected={tuple(expected.shape)}"
+        )
+    actual_f32 = actual.float()
+    expected_f32 = expected.to(device=actual.device, dtype=torch.float32)
+    return (actual_f32 - expected_f32).abs().max().item()
 
 
 def correctness(backend: str) -> dict:
@@ -119,6 +126,21 @@ def correctness(backend: str) -> dict:
         q_data_type=torch.bfloat16,
     )
     output, lse = wrapper.forward_return_lse(q, k, v, causal=True, sm_scale=sm_scale)
+    direct_output, direct_prefill_lse = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=wrapper._qo_indptr_device,
+        cu_seqlens_k=wrapper._kv_indptr_device,
+        max_seqlen_q=wrapper._max_qo_len,
+        max_seqlen_k=wrapper._max_kv_len,
+        softmax_scale=sm_scale,
+        causal=True,
+        scheduler_metadata=wrapper._scheduler_metadata,
+        return_softmax_lse=True,
+        backend=backend,
+    )
+    direct_prefill_lse = direct_prefill_lse.transpose(0, 1).contiguous()
     reference_output, reference_lse = _reference_varlen(
         q, k, v, q_lens, k_lens, True, sm_scale
     )
@@ -136,6 +158,15 @@ def correctness(backend: str) -> dict:
     s_a = torch.randn((seq_len, num_heads), dtype=torch.float32, device="musa")
     s_b = torch.randn_like(s_a)
     merged_v, merged_lse = merge_state(v_a, s_a, v_b, s_b)
+    direct_v, direct_cascade_lse = flash_attn_combine(
+        torch.stack((v_a, v_b)).unsqueeze(1).float(),
+        torch.stack((s_a, s_b))
+        .unsqueeze(1)
+        .transpose(2, 3)
+        .contiguous()
+        .transpose(2, 3),
+        out_dtype=torch.bfloat16,
+    )
     max_lse = torch.maximum(s_a, s_b)
     weight_a = torch.exp(s_a - max_lse)
     weight_b = torch.exp(s_b - max_lse)
@@ -145,12 +176,73 @@ def correctness(backend: str) -> dict:
     ) / denominator.unsqueeze(-1)
     reference_merged_lse = max_lse + denominator.log()
 
-    return {
+    mask = torch.arange(seq_len, device="musa") % 2 == 0
+    inplace_v = v_a.clone()
+    inplace_lse = s_a.clone()
+    merge_state_in_place(inplace_v, inplace_lse, v_b, s_b, mask=mask)
+    reference_inplace_v = torch.where(
+        mask.unsqueeze(-1).unsqueeze(-1),
+        reference_merged_v,
+        v_a.float(),
+    )
+    reference_inplace_lse = torch.where(mask.unsqueeze(-1), reference_merged_lse, s_a)
+
+    states_v = torch.stack((v_a, v_b, v_a * 0.5)).permute(1, 0, 2, 3)
+    states_lse = torch.stack((s_a, s_b, s_a - 0.25)).permute(1, 0, 2)
+    merged_states_v, merged_states_lse = merge_states(states_v, states_lse)
+    states_v_cpu = torch.stack(
+        (v_a.float().cpu(), v_b.float().cpu(), v_a.float().cpu() * 0.5),
+        dim=1,
+    )
+    states_lse_cpu = torch.stack((s_a.cpu(), s_b.cpu(), s_a.cpu() - 0.25), dim=1)
+    states_max = states_lse_cpu.max(dim=1, keepdim=True).values
+    states_weights = torch.exp(states_lse_cpu - states_max)
+    states_denominator = states_weights.sum(dim=1, keepdim=True)
+    reference_states_v = (states_weights.unsqueeze(-1) * states_v_cpu).sum(
+        dim=1
+    ) / states_denominator.squeeze(1).unsqueeze(-1)
+    reference_states_lse = states_max.squeeze(1) + states_denominator.squeeze(1).log()
+
+    result = {
         "prefill_output_max_abs": _max_abs_error(output, reference_output),
         "prefill_lse_max_abs": _max_abs_error(lse, reference_lse),
+        "prefill_wrapper_vs_direct_output": _max_abs_error(output, direct_output),
+        "prefill_wrapper_vs_direct_lse": _max_abs_error(lse, direct_prefill_lse),
         "cascade_output_max_abs": _max_abs_error(merged_v, reference_merged_v),
         "cascade_lse_max_abs": _max_abs_error(merged_lse, reference_merged_lse),
+        "cascade_wrapper_vs_direct_output": _max_abs_error(
+            merged_v, direct_v.squeeze(0)
+        ),
+        "cascade_wrapper_vs_direct_lse": _max_abs_error(
+            merged_lse, direct_cascade_lse.squeeze(0)
+        ),
+        "cascade_inplace_output_max_abs": _max_abs_error(
+            inplace_v, reference_inplace_v
+        ),
+        "cascade_inplace_lse_max_abs": _max_abs_error(
+            inplace_lse, reference_inplace_lse
+        ),
+        "cascade_multi_output_max_abs": _max_abs_error(
+            merged_states_v, reference_states_v
+        ),
+        "cascade_multi_lse_max_abs": _max_abs_error(
+            merged_states_lse, reference_states_lse
+        ),
     }
+    assert result["prefill_output_max_abs"] <= 0.02
+    assert result["prefill_lse_max_abs"] <= 1e-5
+    assert result["prefill_wrapper_vs_direct_output"] <= 1e-4
+    assert result["prefill_wrapper_vs_direct_lse"] <= 1e-5
+    assert result["cascade_output_max_abs"] <= 0.02
+    assert result["cascade_lse_max_abs"] <= 1e-5
+    assert result["cascade_wrapper_vs_direct_output"] <= 1e-4
+    assert result["cascade_wrapper_vs_direct_lse"] <= 1e-5
+    assert result["cascade_inplace_output_max_abs"] <= 0.02
+    assert result["cascade_inplace_lse_max_abs"] <= 1e-5
+    assert result["cascade_multi_output_max_abs"] <= 0.02
+    assert result["cascade_multi_lse_max_abs"] <= 1e-5
+    result["passed"] = True
+    return result
 
 
 def benchmark(iters: int, warmup: int, backend: str) -> dict:
@@ -228,6 +320,7 @@ def benchmark(iters: int, warmup: int, backend: str) -> dict:
     s_b = torch.randn_like(s_a)
     direct_partial = torch.stack((v_a, v_b)).unsqueeze(1).float()
     direct_lse = torch.stack((s_a, s_b)).unsqueeze(1)
+    direct_lse = direct_lse.transpose(2, 3).contiguous().transpose(2, 3)
 
     def direct_cascade():
         return flash_attn_combine(direct_partial, direct_lse, out_dtype=torch.bfloat16)
